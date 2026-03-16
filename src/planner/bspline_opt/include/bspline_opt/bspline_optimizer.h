@@ -125,6 +125,11 @@ namespace ego_planner
 
     inline int getOrder(void) { return order_; }
     inline double getSwarmClearance(void) { return swarm_clearance_; }
+    inline bool getUseFixedWing(void) { return use_fixed_wing_; }
+
+    /* fixed-wing time reallocation via differential flatness (Algorithm 1 in paper) */
+    bool reallocateTimeFixedWing(const Eigen::MatrixXd &Q, double &beta,
+                                 double beta_min, double beta_max, double d_beta);
 
   private:
     GridMap::Ptr grid_map_;
@@ -159,11 +164,27 @@ namespace ego_planner
     double lambda2_, new_lambda2_; // distance weight
     double lambda3_;               // feasibility weight
     double lambda4_;               // curve fitting
+    double lambda_r_;              // curvature cost weight (fixed-wing, stage 2)
 
     int a;
     //
     double dist0_, swarm_clearance_; // safe distance
     double max_vel_, max_acc_;       // dynamic limits
+
+    /* fixed-wing UAV parameters */
+    bool use_fixed_wing_;  // enable fixed-wing mode
+    double min_vel_;       // minimum flight speed (stall speed) [m/s]
+    double k_max_;         // maximum curvature constraint [1/m]
+    // Physical parameters for differential-flatness-based time reallocation
+    double fw_mass_;       // UAV mass [kg]
+    double fw_wing_area_;  // Wing reference area [m^2]
+    double fw_C_D0_;       // Zero-lift drag coefficient
+    double fw_k0_;         // Lift-induced drag factor
+    double fw_rho_;        // Air density [kg/m^3]
+    double fw_T_max_;      // Maximum thrust [N]
+    double fw_T_min_;      // Minimum thrust [N]
+    double fw_n_max_;      // Maximum load factor (structural)
+    double fw_g_;          // Gravitational acceleration [m/s^2]
 
     int variable_num_;              // optimization variables
     int iter_num_;                  // iteration of the solver
@@ -186,6 +207,8 @@ namespace ego_planner
     // q contains all control points
     void calcSmoothnessCost(const Eigen::MatrixXd &q, double &cost, Eigen::MatrixXd &gradient, bool falg_use_jerk = true);
     void calcFeasibilityCost(const Eigen::MatrixXd &q, double &cost, Eigen::MatrixXd &gradient);
+    void calcBoundCostFixedWing(const Eigen::MatrixXd &q, double &cost, Eigen::MatrixXd &gradient);
+    void calcCurvatureCost(const Eigen::MatrixXd &q, double &cost, Eigen::MatrixXd &gradient);
     void calcTerminalCost(const Eigen::MatrixXd &q, double &cost, Eigen::MatrixXd &gradient);
     void calcDistanceCostRebound(const Eigen::MatrixXd &q, double &cost, Eigen::MatrixXd &gradient, int iter_num, double smoothness_cost);
     void calcMovingObjCost(const Eigen::MatrixXd &q, double &cost, Eigen::MatrixXd &gradient);

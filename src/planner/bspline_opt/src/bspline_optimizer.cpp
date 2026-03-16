@@ -12,6 +12,7 @@ namespace ego_planner
     node->declare_parameter("optimization/lambda_collision", -1.0);
     node->declare_parameter("optimization/lambda_feasibility", -1.0);
     node->declare_parameter("optimization/lambda_fitness", -1.0);
+    node->declare_parameter("optimization/lambda_curvature", 0.5);
 
     node->declare_parameter("optimization/dist0", -1.0);
     node->declare_parameter("optimization/swarm_clearance", -1.0);
@@ -20,10 +21,25 @@ namespace ego_planner
 
     node->declare_parameter("optimization/order", 3);
 
+    // Fixed-wing parameters
+    node->declare_parameter("optimization/use_fixed_wing", false);
+    node->declare_parameter("optimization/min_vel", 5.0);
+    node->declare_parameter("optimization/max_curvature", 0.2);
+    node->declare_parameter("optimization/fw_mass", 1.5);
+    node->declare_parameter("optimization/fw_wing_area", 0.35);
+    node->declare_parameter("optimization/fw_C_D0", 0.02);
+    node->declare_parameter("optimization/fw_k0", 0.05);
+    node->declare_parameter("optimization/fw_rho", 1.225);
+    node->declare_parameter("optimization/fw_T_max", 30.0);
+    node->declare_parameter("optimization/fw_T_min", 2.0);
+    node->declare_parameter("optimization/fw_n_max", 3.0);
+    node->declare_parameter("optimization/fw_g", 9.81);
+
     node->get_parameter("optimization/lambda_smooth", lambda1_);
     node->get_parameter("optimization/lambda_collision", lambda2_);
     node->get_parameter("optimization/lambda_feasibility", lambda3_);
     node->get_parameter("optimization/lambda_fitness", lambda4_);
+    node->get_parameter("optimization/lambda_curvature", lambda_r_);
 
     node->get_parameter("optimization/dist0", dist0_);
     node->get_parameter("optimization/swarm_clearance", swarm_clearance_);
@@ -31,6 +47,20 @@ namespace ego_planner
     node->get_parameter("optimization/max_acc", max_acc_);
 
     node->get_parameter("optimization/order", order_);
+
+    // Fixed-wing parameters
+    node->get_parameter("optimization/use_fixed_wing", use_fixed_wing_);
+    node->get_parameter("optimization/min_vel", min_vel_);
+    node->get_parameter("optimization/max_curvature", k_max_);
+    node->get_parameter("optimization/fw_mass", fw_mass_);
+    node->get_parameter("optimization/fw_wing_area", fw_wing_area_);
+    node->get_parameter("optimization/fw_C_D0", fw_C_D0_);
+    node->get_parameter("optimization/fw_k0", fw_k0_);
+    node->get_parameter("optimization/fw_rho", fw_rho_);
+    node->get_parameter("optimization/fw_T_max", fw_T_max_);
+    node->get_parameter("optimization/fw_T_min", fw_T_min_);
+    node->get_parameter("optimization/fw_n_max", fw_n_max_);
+    node->get_parameter("optimization/fw_g", fw_g_);
   }
 
   void BsplineOptimizer::setEnvironment(const GridMap::Ptr &map)
@@ -1799,11 +1829,6 @@ namespace ego_planner
   // 计算损失
   void BsplineOptimizer::combineCostRebound(const double *x, double *grad, double &f_combine, const int n)
   {
-    // cout << "drone_id_=" << drone_id_ << endl;
-    // cout << "cps_.points.size()=" << cps_.points.size() << endl;
-    // cout << "n=" << n << endl;
-    // cout << "sizeof(x[0])=" << sizeof(x[0]) << endl;
-
     memcpy(cps_.points.data() + 3 * order_, x, n * sizeof(x[0]));
 
     /* ---------- evaluate cost and gradient ---------- */
@@ -1818,7 +1843,12 @@ namespace ego_planner
 
     calcSmoothnessCost(cps_.points, f_smoothness, g_smoothness);
     calcDistanceCostRebound(cps_.points, f_distance, g_distance, iter_num_, f_smoothness);
-    calcFeasibilityCost(cps_.points, f_feasibility, g_feasibility);
+    // For fixed-wing: use norm-based bound cost with minimum speed constraint (stall avoidance)
+    // For quadrotor: use per-component velocity / acceleration feasibility cost
+    if (use_fixed_wing_)
+      calcBoundCostFixedWing(cps_.points, f_feasibility, g_feasibility);
+    else
+      calcFeasibilityCost(cps_.points, f_feasibility, g_feasibility);
     // calcMovingObjCost(cps_.points, f_mov_objs, g_mov_objs);
     calcSwarmCost(cps_.points, f_swarm, g_swarm);
     calcTerminalCost(cps_.points, f_terminal, g_terminal);
@@ -1839,24 +1869,288 @@ namespace ego_planner
     memcpy(cps_.points.data() + 3 * order_, x, n * sizeof(x[0]));
 
     /* ---------- evaluate cost and gradient ---------- */
-    double f_smoothness, f_fitness, f_feasibility;
+    double f_smoothness, f_fitness, f_feasibility, f_curvature;
 
     Eigen::MatrixXd g_smoothness = Eigen::MatrixXd::Zero(3, cps_.points.cols());
     Eigen::MatrixXd g_fitness = Eigen::MatrixXd::Zero(3, cps_.points.cols());
     Eigen::MatrixXd g_feasibility = Eigen::MatrixXd::Zero(3, cps_.points.cols());
-
-    // time_satrt = rclcpp::Clock().now();
+    Eigen::MatrixXd g_curvature = Eigen::MatrixXd::Zero(3, cps_.points.cols());
 
     calcSmoothnessCost(cps_.points, f_smoothness, g_smoothness);
     calcFitnessCost(cps_.points, f_fitness, g_fitness);
-    calcFeasibilityCost(cps_.points, f_feasibility, g_feasibility);
 
-    /* ---------- convert to solver format...---------- */
-    f_combine = lambda1_ * f_smoothness + lambda4_ * f_fitness + lambda3_ * f_feasibility;
-    // printf("origin %f %f %f %f\n", f_smoothness, f_fitness, f_feasibility, f_combine);
+    if (use_fixed_wing_)
+    {
+      // Stage 2 for fixed-wing: use curvature cost (J_r) instead of feasibility cost
+      calcCurvatureCost(cps_.points, f_curvature, g_curvature);
+      f_combine = lambda1_ * f_smoothness + lambda4_ * f_fitness + lambda_r_ * f_curvature;
+      Eigen::MatrixXd grad_3D = lambda1_ * g_smoothness + lambda4_ * g_fitness + lambda_r_ * g_curvature;
+      memcpy(grad, grad_3D.data() + 3 * order_, n * sizeof(grad[0]));
+    }
+    else
+    {
+      calcFeasibilityCost(cps_.points, f_feasibility, g_feasibility);
+      f_combine = lambda1_ * f_smoothness + lambda4_ * f_fitness + lambda3_ * f_feasibility;
+      Eigen::MatrixXd grad_3D = lambda1_ * g_smoothness + lambda4_ * g_fitness + lambda3_ * g_feasibility;
+      memcpy(grad, grad_3D.data() + 3 * order_, n * sizeof(grad[0]));
+    }
+  }
 
-    Eigen::MatrixXd grad_3D = lambda1_ * g_smoothness + lambda4_ * g_fitness + lambda3_ * g_feasibility;
-    memcpy(grad, grad_3D.data() + 3 * order_, n * sizeof(grad[0]));
+  // Fixed-wing bound cost with norm-based velocity bounds (min & max speed) and norm-based
+  // acceleration bound (Section 4 of paper: "Gradient-based trajectory planner for fixed-wing UAVs")
+  // J_b = Σ w_v * M_v(V_i) + Σ w_a * M_a(A_i)
+  // M_v: penalises speed below v_min (stall) or above v_max; M_a: penalises ||A_i|| > a_max
+  void BsplineOptimizer::calcBoundCostFixedWing(const Eigen::MatrixXd &q, double &cost,
+                                                Eigen::MatrixXd &gradient)
+  {
+    cost = 0.0;
+    const double ts     = bspline_interval_;
+    const double ts_inv = 1.0 / ts;
+
+    /* ------ velocity bound: minimum (stall) and maximum speed ------ */
+    for (int i = 0; i < q.cols() - 1; i++)
+    {
+      Eigen::Vector3d Vi = (q.col(i + 1) - q.col(i)) * ts_inv;
+      double speed = Vi.norm();
+      if (speed < 1e-6)
+        continue;
+
+      double diff = 0.0;
+      bool   below_min = false;
+
+      if (speed < min_vel_)
+      {
+        diff      = min_vel_ - speed;
+        below_min = true;
+      }
+      else if (speed > max_vel_)
+      {
+        diff = speed - max_vel_;
+      }
+
+      if (diff > 0.0)
+      {
+        cost += diff * diff;
+        // ∂(diff²)/∂Q_i and ∂(diff²)/∂Q_{i+1}
+        // For below_min: diff = v_min - speed, ∂diff/∂speed = -1
+        //   ∂cost/∂Q_i   = 2*diff * (-1) * (-Vi/(speed*ts)) = +2*diff*Vi/(speed*ts)
+        //   ∂cost/∂Q_{i+1} = -2*diff*Vi/(speed*ts)
+        // For above_max: diff = speed - v_max, ∂diff/∂speed = +1
+        //   ∂cost/∂Q_i   = 2*diff * (-Vi/(speed*ts)) (minus because ∂speed/∂Q_i = -Vi/(speed*ts))
+        //   ∂cost/∂Q_{i+1} = 2*diff*Vi/(speed*ts)
+        Eigen::Vector3d dir = 2.0 * diff / (speed * ts) * Vi;
+        if (below_min)
+        {
+          gradient.col(i)     += dir;
+          gradient.col(i + 1) -= dir;
+        }
+        else
+        {
+          gradient.col(i)     -= dir;
+          gradient.col(i + 1) += dir;
+        }
+      }
+    }
+
+    /* ------ acceleration bound: maximum norm of acceleration ------ */
+    const double ts2_inv = ts_inv * ts_inv;
+    for (int i = 0; i < q.cols() - 2; i++)
+    {
+      Eigen::Vector3d Ai = (q.col(i + 2) - 2.0 * q.col(i + 1) + q.col(i)) * ts2_inv;
+      double acc_norm = Ai.norm();
+      if (acc_norm > max_acc_)
+      {
+        double diff_a = acc_norm - max_acc_;
+        cost += diff_a * diff_a;
+        // ∂cost/∂Q_i   = +2*diff_a * Ai/acc_norm
+        // ∂cost/∂Q_{i+1} = -2 * (2*diff_a * Ai/acc_norm)
+        // ∂cost/∂Q_{i+2} = +2*diff_a * Ai/acc_norm
+        // Note: Ai already has the 1/ts² factor, so Ai/acc_norm is the unit direction.
+        Eigen::Vector3d grad_a = 2.0 * diff_a / acc_norm * Ai;
+        gradient.col(i)     += grad_a;
+        gradient.col(i + 1) -= 2.0 * grad_a;
+        gradient.col(i + 2) += grad_a;
+      }
+    }
+  }
+
+  // Curvature cost for trajectory refinement (Section 5.2 of paper).
+  // For each segment of the 3rd-order B-spline, the curvature κ(η) is evaluated at
+  // η = 0, 0.5, 1 using the closed-form curvature of a parametric curve:
+  //   κ(η) = |c'(η) × c''(η)| / |c'(η)|^3
+  // Cost: J_r = Σ_i Σ_{η} max(0, κ(η) - k_max)
+  void BsplineOptimizer::calcCurvatureCost(const Eigen::MatrixXd &q, double &cost,
+                                           Eigen::MatrixXd &gradient)
+  {
+    cost = 0.0;
+
+    // Evaluate at three points per segment: η = 0, 0.5, 1
+    constexpr int   N_ETA = 3;
+    constexpr double ETAS[N_ETA] = {0.0, 0.5, 1.0};
+
+    // For 3rd-order uniform B-spline, each segment uses 4 consecutive control points
+    for (int i = order_; i < q.cols(); i++)
+    {
+      // Control points Q_{i-3}, Q_{i-2}, Q_{i-1}, Q_i
+      const Eigen::Vector3d pts[4] = {q.col(i - 3), q.col(i - 2), q.col(i - 1), q.col(i)};
+
+      for (int e = 0; e < N_ETA; e++)
+      {
+        double eta  = ETAS[e];
+        double eta2 = eta * eta;
+        double eta3 = eta2 * eta;
+
+        // B-spline basis first derivative coefficients dc_k/dη (position coefficients not needed)
+        double dc[4];
+        dc[0] = -0.5 * (1.0 - eta) * (1.0 - eta);
+        dc[1] =  0.5 * (3.0 * eta2 - 4.0 * eta);
+        dc[2] =  0.5 * (-3.0 * eta2 + 2.0 * eta + 1.0);
+        dc[3] =  0.5 * eta2;
+
+        // Second derivative coefficients d²c_k/dη²
+        double ddc[4];
+        ddc[0] = -(1.0 - eta);
+        ddc[1] =  3.0 * eta - 2.0;
+        ddc[2] = -3.0 * eta + 1.0;
+        ddc[3] =  eta;
+
+        // Curve first derivative c'(η) and second derivative c''(η)
+        Eigen::Vector3d cp  = Eigen::Vector3d::Zero();
+        Eigen::Vector3d cpp = Eigen::Vector3d::Zero();
+        for (int k = 0; k < 4; k++)
+        {
+          cp  += dc[k]  * pts[k];
+          cpp += ddc[k] * pts[k];
+        }
+
+        double cp_norm = cp.norm();
+        if (cp_norm < 1e-6)
+          continue;
+
+        Eigen::Vector3d cross      = cp.cross(cpp);
+        double          cross_norm = cross.norm();
+        double          cp_norm3   = cp_norm * cp_norm * cp_norm;
+        double          kappa      = cross_norm / cp_norm3;
+
+        if (kappa > k_max_)
+        {
+          double excess = kappa - k_max_;
+          cost += excess;
+
+          // Gradient of κ w.r.t. each of the 4 control points:
+          // ∂κ/∂Q_k = dc[k] * (-n_cross × cpp) / cp_norm³
+          //         + ddc[k] * (n_cross × cp)  / cp_norm³
+          //         - 3 * dc[k] * κ * cp        / cp_norm²
+          // where n_cross = cross / cross_norm (unit cross-product vector)
+          double cp_norm2 = cp_norm * cp_norm;
+          Eigen::Vector3d n_cross = (cross_norm > 1e-6) ? (cross / cross_norm) : Eigen::Vector3d::Zero();
+
+          for (int k = 0; k < 4; k++)
+          {
+            int idx = i - 3 + k;
+            Eigen::Vector3d grad_kappa =
+                dc[k]  * (-n_cross.cross(cpp)) / cp_norm3
+              + ddc[k] * ( n_cross.cross(cp))  / cp_norm3
+              - 3.0 * dc[k] * kappa * cp       / cp_norm2;
+            gradient.col(idx) += grad_kappa; // ∂excess/∂kappa = 1 when kappa > k_max
+          }
+        }
+      }
+    }
+  }
+
+  // Time reallocation via differential flatness (Algorithm 1 of the paper).
+  // Given control points Q and current time interval beta_0, sample candidate time intervals
+  // in [beta_min, beta_max] and find the one that best satisfies thrust and load-factor limits.
+  // Returns true if a feasible beta was found (constraint satisfaction measure s <= 1).
+  bool BsplineOptimizer::reallocateTimeFixedWing(const Eigen::MatrixXd &Q, double &beta,
+                                                 double beta_min, double beta_max, double d_beta)
+  {
+    const double g  = fw_g_;
+    const double m  = fw_mass_;
+    const double rho = fw_rho_;
+    const double S  = fw_wing_area_;
+    const double C_D0 = fw_C_D0_;
+    const double k0   = fw_k0_;
+
+    // Build candidate beta values by expanding outward from the current beta value,
+    // alternating between the lower and upper sides (as in Algorithm 1).
+    std::vector<double> candidates;
+    double b_lo = beta, b_hi = beta;
+    candidates.push_back(beta);
+    while (b_lo > beta_min || b_hi < beta_max)
+    {
+      if (b_lo > beta_min)
+      {
+        b_lo -= d_beta;
+        candidates.push_back(std::max(b_lo, beta_min));
+      }
+      if (b_hi < beta_max)
+      {
+        b_hi += d_beta;
+        candidates.push_back(std::min(b_hi, beta_max));
+      }
+    }
+
+    double best_s    = std::numeric_limits<double>::max();
+    double best_beta = beta;
+
+    for (double b : candidates)
+    {
+      double max_s = 0.0; // violation measure: feasible when max_s <= 1
+
+      for (int i = 0; i < Q.cols() - 2; i++)
+      {
+        // Control-point velocity and acceleration in world frame
+        Eigen::Vector3d Vi = (Q.col(i + 1) - Q.col(i)) / b;
+        Eigen::Vector3d Ai = (Q.col(i + 2) - 2.0 * Q.col(i + 1) + Q.col(i)) / (b * b);
+
+        double v = Vi.norm();
+        if (v < 1e-6)
+          continue;
+
+        // Flight-path angle γ = arcsin(V_z / v)
+        double sin_gamma = std::max(-1.0, std::min(1.0, Vi(2) / v));
+        double cos_gamma = std::sqrt(std::max(0.0, 1.0 - sin_gamma * sin_gamma));
+
+        // Rate of change of speed: v̇ = V · A / v
+        double v_dot = Vi.dot(Ai) / v;
+
+        // Drag (using zero-lift coefficient for the thrust estimate)
+        double C_L = 2.0 * m * g * cos_gamma / (rho * S * v * v);
+        double CD  = C_D0 + k0 * C_L * C_L;
+        double D   = 0.5 * rho * S * CD * v * v;
+
+        // Thrust from differential flatness: T = m*(v̇ + g*sin(γ)) + D
+        double T = m * (v_dot + g * sin_gamma) + D;
+
+        // Load factor n: lateral acceleration component perpendicular to velocity
+        // n ≈ ||A_⊥|| / g where A_⊥ = A - (A·V̂)V̂ is the centripetal acceleration
+        Eigen::Vector3d V_hat  = Vi / v;
+        Eigen::Vector3d A_perp = Ai - Ai.dot(V_hat) * V_hat;
+        double n_load = A_perp.norm() / g;
+
+        // Accumulate worst-case violation
+        if (fw_T_max_ > 0.0)
+          max_s = std::max(max_s, T / fw_T_max_);
+        if (fw_T_min_ > 0.0 && T > 1e-6)
+          max_s = std::max(max_s, fw_T_min_ / T);
+        if (fw_n_max_ > 0.0)
+          max_s = std::max(max_s, n_load / fw_n_max_);
+      }
+
+      if (max_s < best_s)
+      {
+        best_s    = max_s;
+        best_beta = b;
+      }
+
+      if (best_s <= 1.0)
+        break; // Already feasible – no need to continue searching
+    }
+
+    beta = best_beta;
+    return best_s <= 1.0;
   }
 
 } // namespace ego_planner

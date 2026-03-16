@@ -299,14 +299,54 @@ namespace ego_planner
 
       double ratio;
       bool flag_step_2_success = true;
-      if (!pos.checkFeasibility(ratio, false))
-      {
-        cout << "Need to reallocate time." << endl;
 
-        Eigen::MatrixXd optimal_control_points;
-        flag_step_2_success = refineTrajAlgo(pos, start_end_derivatives, ratio, ts, optimal_control_points);
-        if (flag_step_2_success)
-          pos = UniformBspline(optimal_control_points, 3, ts);
+      if (bspline_optimizer_->getUseFixedWing())
+      {
+        // Fixed-wing mode: use differential-flatness-based time reallocation (Algorithm 1 in paper)
+        // to find the time interval β that keeps thrust and load factor within physical limits,
+        // then run the curvature-aware B-spline refinement optimisation.
+        double beta = ts;
+        const double beta_min = ts * 0.5;
+        const double beta_max = ts * 3.0;
+        const double d_beta   = ts * 0.05;
+
+        bool fw_alloc_ok = bspline_optimizer_->reallocateTimeFixedWing(
+            ctrl_pts, beta, beta_min, beta_max, d_beta);
+        if (!fw_alloc_ok)
+          RCLCPP_WARN(rclcpp::get_logger("ego_planner"),
+                      "[Fixed-wing] Time reallocation could not find a fully feasible β; "
+                      "using best candidate β=%.3f s.", beta);
+
+        if (std::fabs(beta - ts) > 1e-4)
+        {
+          cout << "[Fixed-wing] Time reallocation: ts " << ts << " → " << beta << " s." << endl;
+          double time_ratio = beta / ts; // compute ratio before ts is updated by refineTrajAlgo
+          Eigen::MatrixXd optimal_control_points;
+          flag_step_2_success = refineTrajAlgo(pos, start_end_derivatives, time_ratio, ts, optimal_control_points);
+          if (flag_step_2_success)
+            pos = UniformBspline(optimal_control_points, 3, ts);
+        }
+        else
+        {
+          // β unchanged – still run the curvature-adjustment optimisation
+          Eigen::MatrixXd optimal_control_points;
+          flag_step_2_success = refineTrajAlgo(pos, start_end_derivatives, 1.0, ts, optimal_control_points);
+          if (flag_step_2_success)
+            pos = UniformBspline(optimal_control_points, 3, ts);
+        }
+      }
+      else
+      {
+        // Quadrotor mode: use component-wise velocity/acceleration feasibility check
+        if (!pos.checkFeasibility(ratio, false))
+        {
+          cout << "Need to reallocate time." << endl;
+
+          Eigen::MatrixXd optimal_control_points;
+          flag_step_2_success = refineTrajAlgo(pos, start_end_derivatives, ratio, ts, optimal_control_points);
+          if (flag_step_2_success)
+            pos = UniformBspline(optimal_control_points, 3, ts);
+        }
       }
 
       if (!flag_step_2_success)
