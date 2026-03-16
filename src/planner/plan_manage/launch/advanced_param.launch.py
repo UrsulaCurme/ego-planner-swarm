@@ -23,6 +23,7 @@ def generate_launch_description():
     max_vel = LaunchConfiguration('max_vel', default=2.0)
     max_acc = LaunchConfiguration('max_acc', default=3.0)
     planning_horizon = LaunchConfiguration('planning_horizon', default=7.5)
+    use_fixed_wing = LaunchConfiguration('use_fixed_wing', default=False)
     
     point_num = LaunchConfiguration('point_num', default=1)
     point0_x = LaunchConfiguration('point0_x', default=0.0)
@@ -63,6 +64,7 @@ def generate_launch_description():
     max_vel_arg = DeclareLaunchArgument('max_vel', default_value=max_vel, description='Maximum velocity')
     max_acc_arg = DeclareLaunchArgument('max_acc', default_value=max_acc, description='Maximum acceleration')
     planning_horizon_arg = DeclareLaunchArgument('planning_horizon', default_value=planning_horizon, description='Planning horizon')
+    use_fixed_wing_arg = DeclareLaunchArgument('use_fixed_wing', default_value=use_fixed_wing, description='Enable fixed-wing UAV planning mode')
     
     point_num_arg = DeclareLaunchArgument('point_num', default_value=point_num, description='Number of waypoints')
     point0_x_arg = DeclareLaunchArgument('point0_x', default_value=point0_x, description='Waypoint 0 X coordinate')
@@ -189,10 +191,24 @@ def generate_launch_description():
             {'optimization/lambda_collision': 0.5},
             {'optimization/lambda_feasibility': 0.1},
             {'optimization/lambda_fitness': 1.0},
+            {'optimization/lambda_curvature': 0.5},
             {'optimization/dist0': 0.5},
             {'optimization/swarm_clearance': 0.5},
             {'optimization/max_vel': max_vel},
             {'optimization/max_acc': max_acc},
+            # Fixed-wing mode parameters (active when use_fixed_wing=True)
+            {'optimization/use_fixed_wing': use_fixed_wing},
+            {'optimization/min_vel': 5.0},
+            {'optimization/max_curvature': 0.2},
+            {'optimization/fw_mass': 1.5},
+            {'optimization/fw_wing_area': 0.35},
+            {'optimization/fw_C_D0': 0.02},
+            {'optimization/fw_k0': 0.05},
+            {'optimization/fw_rho': 1.225},
+            {'optimization/fw_T_max': 30.0},
+            {'optimization/fw_T_min': 2.0},
+            {'optimization/fw_n_max': 3.0},
+            {'optimization/fw_g': 9.81},
 
             # B-Spline parameters
             {'bspline/limit_vel': max_vel},
@@ -224,6 +240,7 @@ def generate_launch_description():
     ld.add_action(max_vel_arg)
     ld.add_action(max_acc_arg)
     ld.add_action(planning_horizon_arg)
+    ld.add_action(use_fixed_wing_arg)
     
     ld.add_action(point_num_arg)
     ld.add_action(point0_x_arg)
