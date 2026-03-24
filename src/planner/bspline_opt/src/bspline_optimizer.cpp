@@ -2043,7 +2043,11 @@ namespace ego_planner
           //         - 3 * dc[k] * κ * cp        / cp_norm²
           // where n_cross = cross / cross_norm (unit cross-product vector)
           double cp_norm2 = cp_norm * cp_norm;
-          Eigen::Vector3d n_cross = (cross_norm > 1e-6) ? (cross / cross_norm) : Eigen::Vector3d::Zero();
+          Eigen::Vector3d n_cross = Eigen::Vector3d::Zero();
+          if (cross_norm > 1e-6) {
+            n_cross = cross / cross_norm;
+          }
+          // Eigen::Vector3d n_cross = (cross_norm > 1e-6) ? (cross / cross_norm) : Eigen::Vector3d::Zero();
 
           for (int k = 0; k < 4; k++)
           {

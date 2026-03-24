@@ -2,6 +2,9 @@
 .catkin_workspace
 build/
 devel/
+install/
+log/
+.cache/
 files/
 src/CMakeLists.txt
 benchmark_haha.zip

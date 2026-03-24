@@ -1,20 +1,24 @@
 {
-    "version": "2.0.0",
-    "tasks": [
-        {
-            "label": "catkin_make", 
-            "type": "shell",  
-            "command": "catkin_make",
-            "args": ["-DCMAKE_BUILD_TYPE=Release"],
-            "group": {"kind":"build","isDefault":true},
-            "presentation": {
-                "reveal": "always"
-            },
-            "problemMatcher": "$msCompile"
-        },
-    ]
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "colcon",
+			"args": [
+				"build",
+				"--symlink-install",
+				"--event-handlers",
+				"console_cohesion+",
+				"--base-paths",
+				"/home/lkq/Codes/ego-planner-dev/ego-planner-swarm",
+				"--cmake-args",
+				"-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+				"-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+			],
+			"problemMatcher": [
+				"$colcon-gcc"
+			],
+			"group": "build",
+			"label": "colcon: Colcon Build Release"
+		}
+	]
 }
-
-// catkin_make -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=Yes
-
-

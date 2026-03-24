@@ -4,6 +4,7 @@ project(local_sensing)
 # 设置编译选项
 set(CMAKE_BUILD_TYPE Release)
 add_compile_options(-std=c++17)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
